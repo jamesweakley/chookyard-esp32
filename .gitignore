@@ -1,0 +1,5 @@
+build/
+managed_components/
+gn
+partition_table/partitionTable.csv
+partitions.csv
