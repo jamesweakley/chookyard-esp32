@@ -9,6 +9,7 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <nvs_flash.h>
+#include <esp_timer.h>
 #if CONFIG_PM_ENABLE
 #include <esp_pm.h>
 #endif
@@ -19,6 +20,7 @@
 
 #include <common_macros.h>
 #include <app_priv.h>
+#include "lock/door_lock_manager.h"
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 #endif
@@ -28,6 +30,7 @@
 
 static const char *TAG = "app_main";
 uint16_t door_lock_endpoint_id = 0;
+uint16_t contact_sensor_endpoint_id = 0;
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -47,6 +50,9 @@ static const uint16_t s_decryption_key_len = decryption_key_end - decryption_key
 
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
+    // No need to check for contact sensor updates here anymore
+    // Updates are now scheduled directly on the Matter thread
+    
     switch (event->Type) {
     case chip::DeviceLayer::DeviceEventType::kInterfaceIpAddressChanged:
         ESP_LOGI(TAG, "Interface IP Address changed");
@@ -114,6 +120,13 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     case chip::DeviceLayer::DeviceEventType::kBLEDeinitialized:
         ESP_LOGI(TAG, "BLE deinitialized and memory reclaimed");
         break;
+        
+    // Matter connection events
+    case chip::DeviceLayer::DeviceEventType::kCHIPoBLEConnectionEstablished:
+    case chip::DeviceLayer::DeviceEventType::kCHIPoBLEConnectionClosed:
+    case chip::DeviceLayer::DeviceEventType::kSecureSessionEstablished:
+        ESP_LOGI(TAG, "Matter connection event: %d", event->Type);
+        break;
 
     default:
         break;
@@ -132,6 +145,32 @@ static esp_err_t app_identification_cb(identification::callback_type_t type, uin
 // This callback is called for every attribute update. The callback implementation shall
 // handle the desired attributes and return an appropriate error code. If the attribute
 // is not of your interest, please do not return an error code and strictly return ESP_OK.
+// Custom attribute callback for contact sensor
+static esp_err_t contact_sensor_attribute_callback(attribute::callback_type_t type, uint16_t endpoint_id,
+                                                  uint32_t cluster_id, uint32_t attribute_id,
+                                                  esp_matter_attr_val_t *val, void *priv_data)
+{
+    esp_err_t err = ESP_OK;
+    
+    // Only handle the contact sensor endpoint
+    if (endpoint_id == contact_sensor_endpoint_id) {
+        // BooleanState cluster ID: 0x0045, StateValue attribute ID: 0x0000
+        if (cluster_id == 0x0045 && attribute_id == 0x0000) {
+            if (type == attribute::PRE_UPDATE) {
+                // This is called before the attribute is updated
+                ESP_LOGI(TAG, "Contact sensor state will be updated to: %s",
+                         val->val.b ? "OPEN (active)" : "CLOSED (inactive)");
+            } else if (type == attribute::POST_UPDATE) {
+                // This is called after the attribute is updated
+                ESP_LOGI(TAG, "Contact sensor state was updated to: %s",
+                         val->val.b ? "OPEN (active)" : "CLOSED (inactive)");
+            }
+        }
+    }
+    
+    return err;
+}
+
 static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
                                          uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
 {
@@ -142,6 +181,9 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
         app_driver_handle_t driver_handle = (app_driver_handle_t)priv_data;
         err = app_driver_attribute_update(driver_handle, endpoint_id, cluster_id, attribute_id, val);
     }
+    
+    // Also call our custom contact sensor callback
+    contact_sensor_attribute_callback(type, endpoint_id, cluster_id, attribute_id, val, priv_data);
 
     return err;
 }
@@ -187,6 +229,19 @@ extern "C" void app_main()
 
     door_lock_endpoint_id = endpoint::get_id(endpoint);
     ESP_LOGI(TAG, "Door lock created with endpoint_id %d", door_lock_endpoint_id);
+    
+    // Create a contact sensor endpoint for the reed switch
+    contact_sensor::config_t contact_sensor_config;
+    endpoint_t *contact_sensor_ep = contact_sensor::create(node, &contact_sensor_config, ENDPOINT_FLAG_NONE, NULL);
+    ABORT_APP_ON_FAILURE(contact_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create contact sensor endpoint"));
+    
+    // Store the contact sensor endpoint ID
+    contact_sensor_endpoint_id = endpoint::get_id(contact_sensor_ep);
+    ESP_LOGI(TAG, "Contact sensor created with endpoint_id %d", contact_sensor_endpoint_id);
+    
+    // We'll use the global attribute callback mechanism that's already set up
+    // The contact_sensor_attribute_callback will be called through app_attribute_update_cb
+    ESP_LOGI(TAG, "Contact sensor will use the global attribute callback mechanism");
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
     /* Set OpenThread platform config */
