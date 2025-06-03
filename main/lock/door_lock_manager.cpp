@@ -33,40 +33,81 @@ CHIP_ERROR BoltLockManager::Init(DataModel::Nullable<DlLockState> state)
 
 void BoltLockManager::initActuatorPins()
 {
+    ESP_LOGI(TAG, "Initializing actuator pins with maximum drive capability");
+    
     // Configure GPIO pins for actuator control
     gpio_config_t io_conf = {};
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pin_bit_mask = (1ULL << ACTUATOR_PIN_OPEN) | (1ULL << ACTUATOR_PIN_CLOSE);
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;  // Enable pull-up resistors
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;  // Disable pull-up resistors
     gpio_config(&io_conf);
     
     // Initialize both pins to low
     gpio_set_level(ACTUATOR_PIN_OPEN, 0);
     gpio_set_level(ACTUATOR_PIN_CLOSE, 0);
     
-    ESP_LOGI(TAG, "Actuator pins initialized with pull-ups: OPEN=%d, CLOSE=%d", ACTUATOR_PIN_OPEN, ACTUATOR_PIN_CLOSE);
+    // Set maximum GPIO drive capability for both pins
+    // GPIO_DRIVE_CAP_3 is the strongest drive capability (40mA)
+    ESP_ERROR_CHECK(gpio_set_drive_capability(ACTUATOR_PIN_OPEN, GPIO_DRIVE_CAP_3));
+    ESP_ERROR_CHECK(gpio_set_drive_capability(ACTUATOR_PIN_CLOSE, GPIO_DRIVE_CAP_3));
+    
+    // Verify drive capability was set correctly
+    gpio_drive_cap_t drive_cap_open, drive_cap_close;
+    ESP_ERROR_CHECK(gpio_get_drive_capability(ACTUATOR_PIN_OPEN, &drive_cap_open));
+    ESP_ERROR_CHECK(gpio_get_drive_capability(ACTUATOR_PIN_CLOSE, &drive_cap_close));
+    
+    ESP_LOGI(TAG, "Actuator pins initialized: OPEN=%d (drive=%d), CLOSE=%d (drive=%d)",
+             ACTUATOR_PIN_OPEN, drive_cap_open, ACTUATOR_PIN_CLOSE, drive_cap_close);
 }
 
 void BoltLockManager::controlActuator(bool isOpen)
 {
+    const int startup_delay = 100;        // 100ms startup delay
+    const int direction_change_delay = 300; // 300ms when changing direction
+    const int operation_time = 5000;      // 5 seconds of continuous operation
+    
+    ESP_LOGI(TAG, "Door actuator: Starting %s operation", isOpen ? "OPEN" : "CLOSE");
+    
+    // First ensure both pins are off to avoid any conflicts
+    gpio_set_level(ACTUATOR_PIN_OPEN, 0);
+    gpio_set_level(ACTUATOR_PIN_CLOSE, 0);
+    vTaskDelay(pdMS_TO_TICKS(direction_change_delay));
+    
     if (isOpen) {
         // Open the door
+        ESP_LOGI(TAG, "Setting CLOSE pin to LOW");
         gpio_set_level(ACTUATOR_PIN_CLOSE, 0);  // Ensure close pin is off
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(startup_delay));
+        
+        ESP_LOGI(TAG, "Setting OPEN pin to HIGH");
         gpio_set_level(ACTUATOR_PIN_OPEN, 1);   // Activate open pin
         
+        // Keep the actuator running for the specified time
+        vTaskDelay(pdMS_TO_TICKS(operation_time));
         
+        // Turn off the pin when done
+        gpio_set_level(ACTUATOR_PIN_OPEN, 0);
         ESP_LOGI(TAG, "Door actuator: OPENED");
     } else {
         // Close the door
+        ESP_LOGI(TAG, "Setting OPEN pin to LOW");
         gpio_set_level(ACTUATOR_PIN_OPEN, 0);   // Ensure open pin is off
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(startup_delay));
+        
+        ESP_LOGI(TAG, "Setting CLOSE pin to HIGH");
         gpio_set_level(ACTUATOR_PIN_CLOSE, 1);  // Activate close pin
         
+        // Keep the actuator running for the specified time
+        vTaskDelay(pdMS_TO_TICKS(operation_time));
+        
+        // Turn off the pin when done
+        gpio_set_level(ACTUATOR_PIN_CLOSE, 0);
         ESP_LOGI(TAG, "Door actuator: CLOSED");
     }
+    
+    ESP_LOGI(TAG, "Door actuator: Operation completed");
 }
 
 bool BoltLockManager::Lock(EndpointId endpointId, const Optional<ByteSpan> & pin, OperationErrorEnum & err)

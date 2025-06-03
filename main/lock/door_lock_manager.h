@@ -14,6 +14,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h" // provides FreeRTOS timer support
+#include "freertos/task.h"
 
 #include <lib/core/CHIPError.h>
 #include "driver/gpio.h"
